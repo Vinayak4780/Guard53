@@ -277,23 +277,23 @@ async def generate_excel_report(
                 detail="No valid scan data found for Excel report"
             )
 
-        # Create Excel file in memory
+
+        # Create Excel file in memory and return as response
         import io
         import pandas as pd
+        from fastapi.responses import StreamingResponse
 
         output = io.BytesIO()
         df = pd.DataFrame(excel_data)
         df.to_excel(output, index=False, sheet_name="Scan Report")
         output.seek(0)
 
-        # Save Excel file to the excel_reports folder
         filename = f"scan_report_{datetime.now().strftime('%Y%m%d%H%M%S')}.xlsx"
-        filepath = f"excel_reports/{filename}"
-        with open(filepath, "wb") as f:
-            f.write(output.read())
-
-        logger.info(f"Excel report generated successfully: {filepath}")
-        return {"message": "Excel report generated successfully", "file_path": filepath}
+        headers = {
+            "Content-Disposition": f"attachment; filename={filename}"
+        }
+        logger.info(f"Excel report generated successfully in memory: {filename}")
+        return StreamingResponse(output, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers=headers)
 
     except Exception as e:
         logger.error(f"Error generating Excel report: {e}")
