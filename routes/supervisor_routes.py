@@ -28,15 +28,6 @@ logger = logging.getLogger(__name__)
 supervisor_router = APIRouter()
 
 
-@supervisor_router.get("/dashboard")
-async def get_supervisor_dashboard(current_supervisor: Dict[str, Any] = Depends(get_current_supervisor)):
-    """
-    Supervisor dashboard with assigned area statistics
-    """
-    supervisors_collection = get_supervisors_collection()
-    guards_collection = get_guards_collection()
-    qr_locations_collection = get_qr_locations_collection()
-    scan_events_collection = get_scan_events_collection()
 
 # ============================================================================
 # NEW: Supervisor Add Building API
