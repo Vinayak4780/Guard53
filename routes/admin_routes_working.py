@@ -174,27 +174,67 @@ async def get_area_wise_excel_reports(
             }
             area_data[area_name].append(row_data)
 
-        # Create Excel files for each area
         import pandas as pd
         excel_files = {}
         excel_folder = "excel_reports"
-        os.makedirs(excel_folder, exist_ok=True)
 
-        for area_name, data in area_data.items():
-            if not data:
-                continue
+        # Always return downloadable Excel file, not save to disk
+        import io
+        import pandas as pd
+        from fastapi.responses import StreamingResponse
 
-            # Generate filename
-            filename = f"area_report_{area_name.replace(' ', '_')}_{start_date.strftime('%Y%m%d')}_{end_date.strftime('%Y%m%d')}.xlsx"
-            file_path = os.path.join(excel_folder, filename).replace("/", "\\")
+        # If only one area, return that; else, combine all into one sheet
+        if area and area in area_data:
+            data = area_data[area]
+            filename = f"area_report_{area.replace(' ', '_')}_{start_date.strftime('%Y%m%d')}_{end_date.strftime('%Y%m%d')}.xlsx"
+        else:
+            # Combine all areas into one DataFrame with an 'Area' column
+            combined = []
+            for area_name, data in area_data.items():
+                for row in data:
+                    row["Area"] = area_name
+                    combined.append(row)
+            data = combined
+            filename = f"area_report_all_{start_date.strftime('%Y%m%d')}_{end_date.strftime('%Y%m%d')}.xlsx"
 
-            # Create DataFrame and Excel file
-            df = pd.DataFrame(data)
-            df.to_excel(file_path, index=False, sheet_name="Area Report")
+        output = io.BytesIO()
+        df = pd.DataFrame(data)
+        df.to_excel(output, index=False, sheet_name="Area Report")
+        output.seek(0)
 
-            excel_files[area_name] = file_path
+        headers = {
+            "Content-Disposition": f"attachment; filename={filename}"
+        }
+        return StreamingResponse(output, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers=headers)
 
-        return {"message": "Area-wise Excel reports generated successfully", "files": excel_files}
+        # Create Excel file in memory for the requested area (or all areas)
+        import io
+        import pandas as pd
+        from fastapi.responses import StreamingResponse
+
+        # If only one area, return that; else, combine all into one sheet
+        if area and area in area_data:
+            data = area_data[area]
+            filename = f"area_report_{area.replace(' ', '_')}_{start_date.strftime('%Y%m%d')}_{end_date.strftime('%Y%m%d')}.xlsx"
+        else:
+            # Combine all areas into one DataFrame with an 'Area' column
+            combined = []
+            for area_name, data in area_data.items():
+                for row in data:
+                    row["Area"] = area_name
+                    combined.append(row)
+            data = combined
+            filename = f"area_report_all_{start_date.strftime('%Y%m%d')}_{end_date.strftime('%Y%m%d')}.xlsx"
+
+        output = io.BytesIO()
+        df = pd.DataFrame(data)
+        df.to_excel(output, index=False, sheet_name="Area Report")
+        output.seek(0)
+
+        headers = {
+            "Content-Disposition": f"attachment; filename={filename}"
+        }
+        return StreamingResponse(output, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers=headers)
 
     except Exception as e:
         logger.error(f"Error generating area-wise Excel reports: {e}")
