@@ -148,17 +148,55 @@ async def scan_qr_code(
     """
     try:
         from services.google_drive_excel_service import google_drive_excel_service
+        from services.tomtom_service import tomtom_service
         from datetime import timezone, timedelta
+        from database import get_qr_locations_collection
         
         scan_events_collection = get_scan_events_collection()
+        qr_locations_collection = get_qr_locations_collection()
         
-        if scan_events_collection is None:
+        if scan_events_collection is None or qr_locations_collection is None:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Database not available"
             )
         
         guard_id = current_guard["_id"]
+        guard_email = current_guard.get("email", "")
+        guard_name = current_guard.get("name", "Unknown Guard")
+        
+        # Parse QR content - handle both formats: "ObjectId" or "Organization:Site:ObjectId"
+        actual_qr_id = qr_id
+        qr_organization = None
+        qr_site = None
+        
+        # Check if QR content contains organization and site info
+        if ":" in qr_id:
+            parts = qr_id.split(":")
+            if len(parts) == 3:
+                qr_organization, qr_site, actual_qr_id = parts
+                logger.info(f"Parsed QR content: Organization={qr_organization}, Site={qr_site}, ID={actual_qr_id}")
+            else:
+                actual_qr_id = qr_id
+        
+        # Get QR location information from database
+        try:
+            qr_location = await qr_locations_collection.find_one({"_id": ObjectId(actual_qr_id)})
+            logger.info(f"QR location found: {qr_location}")
+        except Exception as e:
+            logger.error(f"Error finding QR location for ID {actual_qr_id}: {e}")
+            qr_location = None
+        
+        if not qr_location:
+            # Use parsed info from QR content if available, otherwise fallback
+            qr_location = {
+                "organization": qr_organization or "Unknown Organization",
+                "site": qr_site or "Unknown Site",
+                "lat": device_lat,
+                "lng": device_lng,
+                "supervisorId": None
+            }
+            logger.warning(f"QR location not found for ID: {actual_qr_id}, using parsed/fallback values")
         
         # Create scan event (simplified)
         scanned_at = datetime.utcnow()
@@ -168,32 +206,38 @@ async def scan_qr_code(
         scanned_at_ist = scanned_at.astimezone(ist_timezone)
         timestamp_ist = scanned_at_ist.strftime("%d-%m-%Y %H:%M:%S")
         
-        # Extract QR location information (mocked for now)
-        qr_location = {
-            "organization": "Guardians Inc.",
-            "site": "Main Entrance",
-            "lat": device_lat,
-            "lng": device_lng
-        }
+        # Get address from GPS coordinates using TomTom API
+        address_info = await tomtom_service.get_address_from_coordinates(device_lat, device_lng)
         
         scan_event = {
-            "qrId": qr_id,
+            "qrId": actual_qr_id,
+            "originalQrContent": qr_id,  # Store the original QR content
             "guardId": guard_id,
+            "guardEmail": guard_email,
+            "guardName": guard_name,
             "deviceLat": device_lat,
             "deviceLng": device_lng,
             "scannedAt": scanned_at,
             "createdAt": datetime.utcnow(),
             "timestampIST": timestamp_ist,
+            # Add address information from TomTom API
+            "address": address_info.get("address", f"Location at {device_lat:.4f}, {device_lng:.4f}"),
+            "formatted_address": address_info.get("formatted_address", ""),
+            "address_components": address_info.get("components", {}),
+            "address_lookup_success": address_info.get("success", False),
             # Add building and site info from QR location
             "organization": qr_location.get("organization", "Unknown"),
             "site": qr_location.get("site", "Unknown"),
             "lat": qr_location.get("lat", device_lat),
-            "lng": qr_location.get("lng", device_lng)
+            "lng": qr_location.get("lng", device_lng),
+            "supervisorId": qr_location.get("supervisorId", None)
         }
         
         # Insert scan event
         result = await scan_events_collection.insert_one(scan_event)
         scan_event["_id"] = str(result.inserted_id)
+        
+        logger.info(f"Scan event created: ID={scan_event['_id']}, Organization={scan_event['organization']}, SupervisorId={scan_event['supervisorId']}, Guard={guard_name}")
         
         # Log to Google Drive Excel
         try:
@@ -201,20 +245,20 @@ async def scan_qr_code(
                 "timestamp": timestamp_ist,
                 "date": timestamp_ist.split(' ')[0] if ' ' in timestamp_ist else timestamp_ist,
                 "time": timestamp_ist.split(' ')[1] if ' ' in timestamp_ist else "00:00:00",
-                "guard_name": current_guard.get("name", "Unknown"),
-                "guard_email": current_guard.get("email", ""),
+                "guard_name": guard_name,
+                "guard_email": guard_email,
                 "employee_code": "",  # Guard profile not available in simple version
                 "supervisor_name": "Supervisor Name",
-                "supervisor_area": "Area City",
-                "area_city": "Area City", 
-                "qr_location": f"QR {qr_id}",
+                "supervisor_area": qr_location.get("supervisorArea", "Unknown Area"),
+                "area_city": qr_location.get("supervisorArea", "Unknown Area"), 
+                "qr_location": f"{qr_location.get('organization', 'Unknown')} - {qr_location.get('site', 'Unknown')}",
                 "latitude": device_lat,
                 "longitude": device_lng,
                 "distance_meters": 0.0,
                 "status": "SUCCESS",
-                "address": "Address not available",
-                "landmark": "",
-                "remarks": "Guard scan"
+                "address": address_info.get("address", f"Location at {device_lat:.4f}, {device_lng:.4f}"),
+                "landmark": address_info.get("formatted_address", ""),
+                "remarks": f"Guard scan via /guard/scan endpoint - {address_info.get('address', 'GPS coordinates saved')}"
             }
             
             await google_drive_excel_service.add_scan_to_queue(scan_data_for_excel)
@@ -227,7 +271,22 @@ async def scan_qr_code(
         return {
             "message": "QR code scanned successfully",
             "scan_id": str(scan_event["_id"]),
-            "timestamp": timestamp_ist
+            "timestamp": timestamp_ist,
+            "qr_id": actual_qr_id,
+            "original_qr_content": qr_id,
+            "organization": qr_location.get("organization", "Unknown"),
+            "site": qr_location.get("site", "Unknown"),
+            "coordinates": {
+                "scanned_lat": device_lat,
+                "scanned_lng": device_lng
+            },
+            "location_address": {
+                "address": address_info.get("address", f"Location at {device_lat:.4f}, {device_lng:.4f}"),
+                "formatted_address": address_info.get("formatted_address", ""),
+                "address_lookup_success": address_info.get("success", False),
+                "components": address_info.get("components", {})
+            },
+            "note": f"Scan recorded successfully. Location: {address_info.get('address', 'GPS coordinates saved')}"
         }
         
     except HTTPException:
