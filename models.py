@@ -561,6 +561,33 @@ class SupervisorResponse(BaseModel):
     updatedAt: datetime = Field(..., description="Last update timestamp")
 
 
+class AdminAddSupervisorRequest(BaseModel):
+    """Model for admin adding a new supervisor"""
+    name: str = Field(..., min_length=2, max_length=100, description="Supervisor's full name")
+    email: EmailStr = Field(..., description="Supervisor's email address")
+    password: str = Field(..., min_length=6, max_length=50, description="Supervisor's initial password")
+    areaCity: str = Field(..., min_length=2, max_length=100, description="Area/City to supervise")
+    
+    @field_validator('email')
+    @classmethod
+    def validate_supervisor_email(cls, v: str) -> str:
+        """Validate supervisor email format"""
+        return v.lower()
+
+
+class SupervisorAddGuardRequest(BaseModel):
+    """Model for supervisor adding a new guard"""
+    name: str = Field(..., min_length=2, max_length=100, description="Guard's full name")
+    email: EmailStr = Field(..., description="Guard's email address")
+    password: str = Field(..., min_length=6, max_length=50, description="Guard's initial password")
+    
+    @field_validator('email')
+    @classmethod
+    def validate_guard_email(cls, v: str) -> str:
+        """Validate guard email format"""
+        return v.lower()
+
+
 class GuardCreate(BaseModel):
     """Guard creation model for new system"""
     email: EmailStr = Field(..., description="Email address")
