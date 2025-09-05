@@ -14,11 +14,14 @@ from bson import ObjectId
 # Import services and dependencies
 from services.auth_service import get_current_supervisor
 from services.tomtom_service import tomtom_service
+from services.email_service import email_service
+from services.jwt_service import jwt_service
 #from services.excel_service import excel_service
 from database import (
     get_supervisors_collection, get_guards_collection, get_qr_locations_collection,
     get_scan_events_collection, get_users_collection
 )
+from models import SupervisorAddGuardRequest, UserRole
 from config import settings
 
 # Configure logging
@@ -95,56 +98,106 @@ async def get_supervisor_dashboard(current_supervisor: Dict[str, Any] = Depends(
         "supervisorId": ObjectId(supervisor_user_id)
     })
 
-    # Filter scans by supervisor's state - look for scans with addresses containing the state
+    # Improved scan filtering logic - try multiple approaches
     today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
 
-    # Build scan filter for supervisor's specific state (e.g., "Maharashtra")
-    state_filter = {
+    # Primary filter: scans linked to this supervisor
+    supervisor_scan_filter = {
+        "$and": [
+            {"scannedAt": {"$gte": today_start}},
+            {"$or": [
+                {"supervisorId": str(supervisor_user_id)},
+                {"supervisorId": ObjectId(supervisor_user_id)}
+            ]}
+        ]
+    }
+    
+    today_scans = await scan_events_collection.count_documents(supervisor_scan_filter)
+    
+    # If no scans found by supervisorId, try area-based filtering
+    if today_scans == 0:
+        area_scan_filter = {
+            "$and": [
+                {"scannedAt": {"$gte": today_start}},
+                {"$or": [
+                    {"organization": {"$regex": supervisor_state, "$options": "i"}},
+                    {"site": {"$regex": supervisor_state, "$options": "i"}},
+                    {"address": {"$regex": supervisor_state, "$options": "i"}},
+                    {"formatted_address": {"$regex": supervisor_state, "$options": "i"}}
+                ]}
+            ]
+        }
+        today_scans = await scan_events_collection.count_documents(area_scan_filter)
+
+    # Get this week's scan statistics using the same logic
+    week_start = today_start - timedelta(days=today_start.weekday())
+    week_supervisor_filter = {
+        "$and": [
+            {"scannedAt": {"$gte": week_start}},
+            {"$or": [
+                {"supervisorId": str(supervisor_user_id)},
+                {"supervisorId": ObjectId(supervisor_user_id)}
+            ]}
+        ]
+    }
+    
+    this_week_scans = await scan_events_collection.count_documents(week_supervisor_filter)
+    
+    # If no scans found by supervisorId, try area-based filtering for the week
+    if this_week_scans == 0:
+        week_area_filter = {
+            "$and": [
+                {"scannedAt": {"$gte": week_start}},
+                {"$or": [
+                    {"organization": {"$regex": supervisor_state, "$options": "i"}},
+                    {"site": {"$regex": supervisor_state, "$options": "i"}},
+                    {"address": {"$regex": supervisor_state, "$options": "i"}},
+                    {"formatted_address": {"$regex": supervisor_state, "$options": "i"}}
+                ]}
+            ]
+        }
+        this_week_scans = await scan_events_collection.count_documents(week_area_filter)
+
+    # Get recent scan events with improved filtering
+    recent_scans_filter = {
         "$or": [
+            {"supervisorId": str(supervisor_user_id)},
+            {"supervisorId": ObjectId(supervisor_user_id)},
+            {"organization": {"$regex": supervisor_state, "$options": "i"}},
+            {"site": {"$regex": supervisor_state, "$options": "i"}},
             {"address": {"$regex": supervisor_state, "$options": "i"}},
             {"formatted_address": {"$regex": supervisor_state, "$options": "i"}}
         ]
     }
-
-    # Get today's scan statistics for this state
-    today_state_filter = {
-        "$and": [
-            {"scannedAt": {"$gte": today_start}},
-            state_filter
-        ]
-    }
-    today_scans = await scan_events_collection.count_documents(today_state_filter)
-
-    # Get this week's scan statistics for this state
-    week_start = today_start - timedelta(days=today_start.weekday())
-    week_state_filter = {
-        "$and": [
-            {"scannedAt": {"$gte": week_start}},
-            state_filter
-        ]
-    }
-    this_week_scans = await scan_events_collection.count_documents(week_state_filter)
-
-    # Get recent scan events - only from supervisor's state
-    recent_scans_cursor = scan_events_collection.find(state_filter).sort("scannedAt", -1).limit(10)
+    
+    recent_scans_cursor = scan_events_collection.find(recent_scans_filter).sort("scannedAt", -1).limit(10)
     recent_scans = await recent_scans_cursor.to_list(length=None)
 
-    # Get guards with most activity - only from supervisor's state
+    # Get guards with most activity - use the same improved filtering
     guard_activity_pipeline = [
         {"$match": {
             "$and": [
                 {"scannedAt": {"$gte": week_start}},
-                state_filter
+                {"$or": [
+                    {"supervisorId": str(supervisor_user_id)},
+                    {"supervisorId": ObjectId(supervisor_user_id)},
+                    {"organization": {"$regex": supervisor_state, "$options": "i"}},
+                    {"site": {"$regex": supervisor_state, "$options": "i"}},
+                    {"address": {"$regex": supervisor_state, "$options": "i"}},
+                    {"formatted_address": {"$regex": supervisor_state, "$options": "i"}}
+                ]}
             ]
         }},
         {"$group": {
             "_id": "$guardEmail",
+            "guard_name": {"$first": "$guardName"},
             "scan_count": {"$sum": 1}
         }},
         {"$sort": {"scan_count": -1}},
         {"$limit": 5},
         {"$project": {
             "guard_email": "$_id",
+            "guard_name": 1,
             "scan_count": 1,
             "_id": 0
         }}
@@ -210,11 +263,16 @@ async def generate_excel_report(
         # Calculate date range
         end_date = datetime.utcnow()
         start_date = end_date - timedelta(days=days_back)
-        logger.info(f"Date range: {start_date} to {end_date}")
-
+        
         # Build query filter
         supervisor_id = current_supervisor["_id"]
-        # Try both string and ObjectId for supervisorId filter
+        supervisor_area = current_supervisor.get("areaCity", "")
+        
+        logger.info(f"Excel report request - Days back: {days_back}, Building name: {building_name}")
+        logger.info(f"Date range: {start_date} to {end_date}")
+        logger.info(f"Supervisor ID: {supervisor_id}, Supervisor area: {supervisor_area}")
+        
+        # Primary query: Try both string and ObjectId for supervisorId filter
         query_filter = {
             "scannedAt": {"$gte": start_date, "$lte": end_date},
             "$or": [
@@ -224,10 +282,40 @@ async def generate_excel_report(
         }
 
         if building_name:
-            query_filter["organization"] = building_name
+            # Case-insensitive search for building name
+            query_filter["organization"] = {"$regex": building_name, "$options": "i"}
 
         # Filter scans by supervisor's area and date range
         scans = await scan_events_collection.find(query_filter).to_list(length=None)
+        
+        # If no scans found with supervisorId, try to find scans in the supervisor's area or by building name
+        if not scans:
+            logger.info(f"No scans found by supervisorId, trying alternative queries")
+            
+            alternative_query_filter = {
+                "scannedAt": {"$gte": start_date, "$lte": end_date}
+            }
+            
+            if building_name:
+                # Case-insensitive search for building name in organization field
+                alternative_query_filter["organization"] = {"$regex": building_name, "$options": "i"}
+            
+            # Get all scans in date range matching building name (regardless of supervisorId)
+            scans = await scan_events_collection.find(alternative_query_filter).to_list(length=None)
+            logger.info(f"Found {len(scans)} scans using alternative query (building name: {building_name})")
+            
+            # If still no scans and we have supervisor area, try area-based search
+            if not scans and supervisor_area:
+                area_query_filter = {
+                    "scannedAt": {"$gte": start_date, "$lte": end_date}
+                }
+                
+                # Get all scans in date range and filter by organization name matching area
+                all_scans = await scan_events_collection.find(area_query_filter).to_list(length=None)
+                scans = [scan for scan in all_scans 
+                        if supervisor_area.lower() in scan.get("organization", "").lower() 
+                        or supervisor_area.lower() in scan.get("site", "").lower()]
+                logger.info(f"Found {len(scans)} scans in supervisor's area: {supervisor_area}")
 
         if not scans:
             logger.warning("No scan data found in the specified date range")
@@ -237,26 +325,40 @@ async def generate_excel_report(
             )
 
         # Debug: Log all scan events found by query
-        logger.info(f"Scan events found: {scans}")
+        logger.info(f"Total scan events found: {len(scans)}")
+        
         # Prepare Excel data
         excel_data = []
         for scan in scans:
             try:
                 date_time = scan["scannedAt"].strftime("%Y-%m-%d %H:%M:%S") if hasattr(scan["scannedAt"], "strftime") else str(scan["scannedAt"])
-                building = scan.get("organization")
-                site = scan.get("site")
-                guard_name = scan.get("guardName")
-                if not (building and site and guard_name):
-                    logger.warning(f"Skipping scan event missing required fields: {scan}")
-                    continue
+                building = scan.get("organization", "Unknown Organization")
+                site = scan.get("site", "Unknown Site")
+                
+                # Handle different guard name fields from different endpoints
+                guard_name = scan.get("guardName") or scan.get("guard_name") or "Unknown Guard"
+                
+                # Include scan source information for debugging
+                scan_source = "/guard/scan" if scan.get("guardId") else "/qr/scan"
+                
+                logger.info(f"Processing scan: Building={building}, Site={site}, Guard={guard_name}, Source={scan_source}")
+                
                 row_data = {
                     "Date + Time": date_time,
                     "Action": "QR Code Scan",
                     "Building Name": building,
                     "Site Name": site,
-                    "Guard Name": guard_name
+                    "Guard Name": guard_name,
+                    "Scan Source": scan_source,
+                    "Guard Email": scan.get("guardEmail", ""),
+                    "QR ID": scan.get("qrId", ""),
+                    "Address": scan.get("address", f"Lat: {scan.get('deviceLat', '')}, Lng: {scan.get('deviceLng', '')}"),
+                    "Formatted Address": scan.get("formatted_address", ""),
+                    "Latitude": scan.get("deviceLat", ""),
+                    "Longitude": scan.get("deviceLng", "")
                 }
                 excel_data.append(row_data)
+                
             except Exception as e:
                 logger.error(f"Error processing scan event: {e}, scan: {scan}")
                 continue
@@ -286,10 +388,127 @@ async def generate_excel_report(
         logger.info(f"Excel report generated successfully in memory: {filename}")
         return StreamingResponse(output, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers=headers)
 
+    except HTTPException:
+        raise
     except Exception as e:
+        import traceback
         logger.error(f"Error generating Excel report: {e}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="An error occurred while generating the report"
+            detail=f"An error occurred while generating the report: {str(e)}"
+        )
+
+
+# ============================================================================
+# SUPERVISOR: Add Guard API
+# ============================================================================
+
+@supervisor_router.post("/add-guard")
+async def add_guard(
+    guard_data: SupervisorAddGuardRequest,
+    current_supervisor: Dict[str, Any] = Depends(get_current_supervisor)
+):
+    """
+    SUPERVISOR ONLY: Add a new guard to the system
+    Creates guard account and sends credentials via email
+    """
+    try:
+        users_collection = get_users_collection()
+        guards_collection = get_guards_collection()
+        
+        if users_collection is None or guards_collection is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Database not available"
+            )
+        
+        supervisor_id = str(current_supervisor["_id"])
+        supervisor_name = current_supervisor.get("name", current_supervisor.get("email", "Supervisor"))
+        supervisor_area = current_supervisor.get("areaCity", "Unknown")
+        
+        # Check if user already exists
+        existing_user = await users_collection.find_one({"email": guard_data.email})
+        if existing_user:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"User with email {guard_data.email} already exists"
+            )
+        
+        # Hash the password
+        hashed_password = jwt_service.hash_password(guard_data.password)
+        
+        # Create user record
+        user_data = {
+            "email": guard_data.email,
+            "name": guard_data.name,
+            "role": UserRole.GUARD.value,
+            "passwordHash": hashed_password,
+            "isActive": True,
+            "isEmailVerified": True,  # Auto-verified since created by supervisor
+            "createdBy": supervisor_id,
+            "createdAt": datetime.utcnow(),
+            "updatedAt": datetime.utcnow(),
+            "areaCity": supervisor_area,
+            "supervisorId": supervisor_id
+        }
+        
+        # Insert user
+        user_result = await users_collection.insert_one(user_data)
+        user_id = str(user_result.inserted_id)
+        
+        # Create guard record
+        guard_data_record = {
+            "userId": ObjectId(user_id),
+            "supervisorId": ObjectId(supervisor_id),
+            "email": guard_data.email,
+            "name": guard_data.name,
+            "areaCity": supervisor_area,
+            "shift": "Day Shift",  # Default shift
+            "phoneNumber": "",  # Can be updated later
+            "emergencyContact": "",  # Can be updated later
+            "isActive": True,
+            "createdBy": supervisor_id,
+            "createdAt": datetime.utcnow(),
+            "updatedAt": datetime.utcnow()
+        }
+        
+        # Insert guard
+        guard_result = await guards_collection.insert_one(guard_data_record)
+        guard_id = str(guard_result.inserted_id)
+        
+        # Send credentials email to guard
+        email_sent = await email_service.send_guard_credentials_email(
+            to_email=guard_data.email,
+            name=guard_data.name,
+            password=guard_data.password,
+            supervisor_name=supervisor_name
+        )
+        
+        logger.info(f"Supervisor {supervisor_name} created guard account for {guard_data.name} ({guard_data.email})")
+        
+        return {
+            "message": "Guard added successfully",
+            "guard": {
+                "id": guard_id,
+                "userId": user_id,
+                "name": guard_data.name,
+                "email": guard_data.email,
+                "areaCity": supervisor_area,
+                "supervisorId": supervisor_id,
+                "supervisorName": supervisor_name,
+                "createdAt": datetime.utcnow().isoformat()
+            },
+            "credentials_sent": email_sent,
+            "note": "Guard has been created and credentials sent via email. Guard can change password using /auth/reset-password endpoint."
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error adding guard: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to add guard: {str(e)}"
         )
 
