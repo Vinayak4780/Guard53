@@ -457,10 +457,15 @@ async def add_guard(
         user_result = await users_collection.insert_one(user_data)
         user_id = str(user_result.inserted_id)
         
+        # Generate employee code for guard
+        guard_count = await guards_collection.count_documents({})
+        employee_code = f"GRD{str(guard_count + 1).zfill(3)}"
+        
         # Create guard record
         guard_data_record = {
             "userId": ObjectId(user_id),
             "supervisorId": ObjectId(supervisor_id),
+            "employeeCode": employee_code,
             "email": guard_data.email,
             "name": guard_data.name,
             "areaCity": supervisor_area,
@@ -492,6 +497,7 @@ async def add_guard(
             "guard": {
                 "id": guard_id,
                 "userId": user_id,
+                "employeeCode": employee_code,
                 "name": guard_data.name,
                 "email": guard_data.email,
                 "areaCity": supervisor_area,
