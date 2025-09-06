@@ -518,3 +518,105 @@ async def add_guard(
             detail=f"Failed to add guard: {str(e)}"
         )
 
+
+# ============================================================================
+# SUPERVISOR: Delete Guard API
+# ============================================================================
+
+@supervisor_router.delete("/delete-guard")
+async def delete_guard(
+    name: str,
+    email: str,
+    current_supervisor: Dict[str, Any] = Depends(get_current_supervisor)
+):
+    """
+    SUPERVISOR ONLY: Delete a guard from the system by name and email
+    Removes guard from both guards and users collections
+    """
+    try:
+        users_collection = get_users_collection()
+        guards_collection = get_guards_collection()
+        
+        if users_collection is None or guards_collection is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Database not available"
+            )
+        
+        # Verify the guard belongs to this supervisor
+        supervisor_id = str(current_supervisor["_id"])
+        
+        # First, let's check if any guard exists with this name and email (regardless of supervisor)
+        any_guard = await guards_collection.find_one({
+            "name": name.strip(),  # Remove any trailing spaces
+            "email": email.strip()
+        })
+        
+        if not any_guard:
+            # Check for similar names (case-insensitive)
+            similar_guard = await guards_collection.find_one({
+                "name": {"$regex": f"^{name.strip()}$", "$options": "i"},
+                "email": {"$regex": f"^{email.strip()}$", "$options": "i"}
+            })
+            
+            if not similar_guard:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"No guard found with name '{name.strip()}' and email '{email.strip()}' in the system"
+                )
+        
+        # Find guard by name and email that belongs to this supervisor
+        guard = await guards_collection.find_one({
+            "name": name.strip(),  # Remove any trailing spaces
+            "email": email.strip(),
+            "supervisorId": ObjectId(supervisor_id)
+        })
+        
+        if not guard:
+            # The guard exists but doesn't belong to this supervisor
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Guard with name '{name.strip()}' and email '{email.strip()}' exists but does not belong to your supervision"
+            )
+        
+        guard_id = str(guard["_id"])
+        user_id = guard.get("userId")
+        
+        # Delete from guards collection
+        guard_result = await guards_collection.delete_one({"_id": guard["_id"]})
+        
+        # Delete from users collection if userId exists
+        user_result = None
+        if user_id:
+            user_result = await users_collection.delete_one({"_id": user_id})
+        
+        # Send email notification to the guard
+        supervisor_name = current_supervisor.get("name", current_supervisor.get("email", "Your supervisor"))
+        email_sent = await email_service.send_account_removal_email(
+            to_email=email,
+            name=name,
+            role="Guard",
+            removed_by=supervisor_name
+        )
+        
+        logger.info(f"Supervisor {supervisor_id} deleted guard {guard_id} ({name}, {email})")
+        
+        return {
+            "message": "Guard deleted successfully",
+            "guard_id": guard_id,
+            "name": name,
+            "email": email,
+            "user_deleted": user_result.deleted_count > 0 if user_result else False,
+            "email_sent": email_sent,
+            "note": "Guard has been removed from the system and notification email sent"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting guard: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to delete guard: {str(e)}"
+        )
+
