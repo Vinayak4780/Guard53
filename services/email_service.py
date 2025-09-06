@@ -474,5 +474,67 @@ class EmailService:
             return False
 
 
+    async def send_account_removal_email(self, to_email: str, name: str, role: str, removed_by: str) -> bool:
+        """
+        Send notification email when an account is removed
+        
+        Args:
+            to_email: User's email address
+            name: User's name
+            role: User's role (supervisor, guard)
+            removed_by: Name or email of the person who removed the account
+            
+        Returns:
+            True if email sent successfully, False otherwise
+        """
+        try:
+            subject = "Account Removed - Guard Management System"
+            
+            html_content = f"""
+            <html>
+            <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+                <div style="max-width: 600px; margin: 0 auto; padding: 20px;">
+                    <div style="background-color: #e74c3c; color: white; padding: 10px; text-align: center;">
+                        <h2 style="margin: 0;">Account Removed</h2>
+                    </div>
+                    <div style="padding: 20px; border: 1px solid #ddd; border-top: none;">
+                        <p>Dear {name},</p>
+                        <p>This is to notify you that your {role} account in the Guard Management System has been removed by <strong>{removed_by}</strong>.</p>
+                        <p>If you believe this was done in error, please contact your administrator.</p>
+                        <p>Thank you for your service.</p>
+                        <p style="margin-top: 30px; font-size: 14px; color: #777;">
+                            This is an automated email from Guard Management System. Please do not reply to this email.
+                        </p>
+                    </div>
+                </div>
+            </body>
+            </html>
+            """
+            
+            message = MIMEMultipart("alternative")
+            message["Subject"] = subject
+            message["From"] = f"{self.from_name} <{self.from_email}>"
+            message["To"] = to_email
+            
+            html_part = MIMEText(html_content, "html")
+            message.attach(html_part)
+            
+            await aiosmtplib.send(
+                message,
+                hostname=self.smtp_host,
+                port=self.smtp_port,
+                start_tls=True,
+                username=self.smtp_username,
+                password=self.smtp_password,
+            )
+            
+            logger.info(f"Account removal email sent successfully to {to_email}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to send account removal email to {to_email}: {e}")
+            return False
+
+
 # Global email service instance
 email_service = EmailService()
