@@ -399,3 +399,83 @@ async def add_supervisor(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to add supervisor: {str(e)}"
         )
+
+
+# ============================================================================
+# ADMIN: Delete Supervisor API
+# ============================================================================
+
+@admin_router.delete("/delete-supervisor")
+async def delete_supervisor(
+    name: str,
+    email: str,
+    area: str,
+    current_admin: Dict[str, Any] = Depends(get_current_admin)
+):
+    """
+    ADMIN ONLY: Delete a supervisor from the system by name, email and area
+    Removes supervisor from both supervisors and users collections
+    """
+    try:
+        users_collection = get_users_collection()
+        supervisors_collection = get_supervisors_collection()
+        
+        if users_collection is None or supervisors_collection is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Database not available"
+            )
+        
+        # Find supervisor by name, email and area
+        supervisor = await supervisors_collection.find_one({
+            "name": name,
+            "email": email,
+            "areaCity": area
+        })
+        
+        if not supervisor:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Supervisor with name '{name}', email '{email}', and area '{area}' not found"
+            )
+        
+        supervisor_id = str(supervisor["_id"])
+        
+        # Delete from supervisors collection
+        supervisor_result = await supervisors_collection.delete_one({"_id": supervisor["_id"]})
+        
+        # Delete from users collection if userId exists
+        user_result = None
+        if supervisor.get("userId"):
+            user_result = await users_collection.delete_one({"_id": supervisor["userId"]})
+        
+        # Send email notification to the supervisor
+        admin_name = current_admin.get("name", current_admin.get("email", "System Administrator"))
+        email_sent = await email_service.send_account_removal_email(
+            to_email=email,
+            name=name,
+            role="Field Officer",  # Using the new terminology
+            removed_by=admin_name
+        )
+        
+        logger.info(f"Admin {current_admin.get('email')} deleted supervisor {supervisor_id} ({name}, {email}, {area})")
+        
+        return {
+            "message": "Supervisor deleted successfully",
+            "supervisor_id": supervisor_id,
+            "name": name,
+            "email": email,
+            "area": area,
+            "user_deleted": user_result.deleted_count > 0 if user_result else False,
+            "email_sent": email_sent,
+            "note": "Supervisor has been removed from the system and notification email sent"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting supervisor: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to delete supervisor: {str(e)}"
+        )
