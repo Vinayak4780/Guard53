@@ -342,9 +342,14 @@ async def add_supervisor(
         user_result = await users_collection.insert_one(user_data)
         user_id = str(user_result.inserted_id)
         
+        # Generate supervisor code
+        supervisor_count = await supervisors_collection.count_documents({})
+        supervisor_code = f"SUP{str(supervisor_count + 1).zfill(3)}"
+        
         # Create supervisor record
         supervisor_data_record = {
             "userId": ObjectId(user_id),
+            "code": supervisor_code,
             "email": supervisor_data.email,
             "name": supervisor_data.name,
             "areaCity": supervisor_data.areaCity,
@@ -374,6 +379,7 @@ async def add_supervisor(
             "supervisor": {
                 "id": supervisor_id,
                 "userId": user_id,
+                "code": supervisor_code,
                 "name": supervisor_data.name,
                 "email": supervisor_data.email,
                 "areaCity": supervisor_data.areaCity,
